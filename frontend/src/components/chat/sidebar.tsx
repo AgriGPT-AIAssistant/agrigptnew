@@ -50,8 +50,8 @@ export function Sidebar() {
   );
 
   // Fallback defaults if no active Google session is found
-  const userDisplayName = user?.name || 'Aakash Lagisetti';
-  const userDisplayEmail = user?.email || 'aakashlagisetti@gmail.com';
+  const userDisplayName = user?.name || 'Guest User';
+  const userDisplayEmail = user?.email || 'Not logged in';
   const userInitials = userDisplayName
     .split(' ')
     .map(n => n[0])

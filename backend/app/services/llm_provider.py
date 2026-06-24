@@ -37,13 +37,20 @@ class LLMProvider:
         messages: List[Dict[str, str]],
         stream: bool,
         model_name: Optional[str] = None,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None
     ) -> tuple[str, Dict[str, str], Dict[str, Any]]:
         payload: Dict[str, Any] = {
             "messages": messages,
             "stream": stream,
             "temperature": temperature
         }
+        
+        if tools:
+            payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
 
         if provider == "groq":
             url = self.groq_url
@@ -86,7 +93,9 @@ class LLMProvider:
         messages: List[Dict[str, str]],
         model_name: Optional[str] = None,
         temperature: float = 0.7,
-        provider_override: Optional[str] = None
+        provider_override: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None
     ) -> str:
         primary_provider = self._determine_provider(provider_override)
         providers_to_try = [primary_provider]
@@ -101,7 +110,8 @@ class LLMProvider:
         for prov in providers_to_try:
             try:
                 url, headers, payload = self._get_headers_and_payload(
-                    prov, messages, stream=False, model_name=model_name, temperature=temperature
+                    prov, messages, stream=False, model_name=model_name, temperature=temperature,
+                    tools=tools, tool_choice=tool_choice
                 )
                 logger.info(f"Sending standard chat completion to {prov} using model {payload.get('model')}")
                 
@@ -113,7 +123,10 @@ class LLMProvider:
                     data = response.json()
                     choices = data.get("choices", [])
                     if choices:
-                        return choices[0].get("message", {}).get("content", "").strip()
+                        message = choices[0].get("message", {})
+                        if message.get("tool_calls"):
+                            return message["tool_calls"][0]["function"]["arguments"].strip()
+                        return message.get("content", "").strip()
                     raise Exception("Empty choices list received")
             except Exception as e:
                 logger.warning(f"Failed standard completion on provider '{prov}': {str(e)}")

@@ -42,3 +42,21 @@ async def chat_interaction_stream(request: ChatRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Streaming Error: {str(e)}")
+
+@router.get("/sessions")
+async def get_chat_sessions():
+    """Fetch all active chat sessions for the sidebar."""
+    try:
+        sessions = await ai_service.memory_manager.get_sessions()
+        return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@router.get("/history/{session_id}")
+async def get_chat_history(session_id: str):
+    """Fetch chat history for a specific session."""
+    try:
+        history = await ai_service.memory_manager.get_history(session_id)
+        return {"session_id": session_id, "history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
