@@ -2,12 +2,13 @@ import json
 import logging
 import sqlite3
 import os
+import datetime
 from typing import List, Dict
 
 try:
-    import redis.asyncio as redis
+    from motor.motor_asyncio import AsyncIOMotorClient
 except ImportError:
-    redis = None
+    AsyncIOMotorClient = None
 
 from app.core.config import settings
 
@@ -15,30 +16,36 @@ logger = logging.getLogger("agrigpt.services.memory_manager")
 
 class MemoryManager:
     """
-    Manages conversational memory using Redis for persistence, with a
-    proper SQLite database fallback if Redis is unavailable or not configured.
+    Manages conversational memory using MongoDB for cloud persistence, 
+    with a proper SQLite database fallback if MongoDB is not configured.
     """
     def __init__(self, max_history: int = 6):
         self.max_history = max_history
-        self.redis_client = None
+        self.mongo_client = None
+        self.db = None
+        self.sessions_col = None
+        self.messages_col = None
         
-        # Setup SQLite Database fallback for persistent storage
+        # 1. Setup SQLite Database fallback for local persistent storage
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.db_path = os.path.join(base_dir, "data", "chat_history.db")
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_sqlite_db()
         
-        # Check if Redis URL is configured and redis is installed
-        redis_url = getattr(settings, "REDIS_URL", None)
-        if redis and redis_url:
+        # 2. Check if MONGO_URI is configured and motor is installed
+        mongo_uri = getattr(settings, "MONGO_URI", os.getenv("MONGO_URI"))
+        if AsyncIOMotorClient and mongo_uri:
             try:
-                self.redis_client = redis.from_url(redis_url, decode_responses=True)
-                logger.info(f"MemoryManager initialized with Redis at {redis_url}")
+                self.mongo_client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=5000)
+                self.db = self.mongo_client.agrigpt
+                self.sessions_col = self.db.sessions
+                self.messages_col = self.db.messages
+                logger.info(f"MemoryManager initialized with MongoDB Atlas")
             except Exception as e:
-                logger.warning(f"Failed to initialize Redis client: {e}. Using SQLite fallback.")
-                self.redis_client = None
+                logger.warning(f"Failed to initialize MongoDB client: {e}. Using SQLite fallback.")
+                self.mongo_client = None
         else:
-            logger.info("No REDIS_URL configured or redis not installed. Using SQLite fallback database.")
+            logger.info("No MONGO_URI configured or motor not installed. Using local SQLite database.")
 
     def _init_sqlite_db(self):
         """Initializes the local SQLite database for persistent history fallback."""
@@ -69,14 +76,15 @@ class MemoryManager:
         if not session_id:
             return []
 
-        if self.redis_client:
+        # MongoDB Route
+        if self.mongo_client:
             try:
-                key = f"session:{session_id}:memory"
-                data = await self.redis_client.lrange(key, 0, -1)
-                history = [json.loads(item) for item in data]
-                return history
+                cursor = self.messages_col.find({"session_id": session_id}).sort("created_at", 1)
+                messages = await cursor.to_list(length=100)
+                history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+                return history[-(self.max_history * 2):] if history else []
             except Exception as e:
-                logger.warning(f"Redis get_history failed for {session_id}: {e}")
+                logger.warning(f"MongoDB get_history failed for {session_id}: {e}")
                 
         # SQLite Database fallback
         try:
@@ -94,25 +102,15 @@ class MemoryManager:
             return []
 
     async def get_sessions(self) -> List[Dict[str, str]]:
-        """Retrieve a list of all active sessions and their first message."""
-        sessions = []
-        if self.redis_client:
+        """Retrieve a list of all active sessions and their titles."""
+        # MongoDB Route
+        if self.mongo_client:
             try:
-                keys = await self.redis_client.keys("session:*:memory")
-                for key in keys:
-                    session_id = key.split(":")[1]
-                    first_msg_str = await self.redis_client.lindex(key, 0)
-                    title = "New Chat"
-                    if first_msg_str:
-                        try:
-                            msg = json.loads(first_msg_str)
-                            title = msg.get("content", "New Chat")[:50]
-                        except:
-                            pass
-                    sessions.append({"session_id": session_id, "title": title})
-                return sessions
+                cursor = self.sessions_col.find({}).sort("updated_at", -1)
+                sessions = await cursor.to_list(length=100)
+                return [{"session_id": s["session_id"], "title": s.get("title", "New Chat")} for s in sessions]
             except Exception as e:
-                logger.warning(f"Redis get_sessions failed: {e}")
+                logger.warning(f"MongoDB get_sessions failed: {e}")
                 
         # SQLite Database fallback
         try:
@@ -130,28 +128,40 @@ class MemoryManager:
         if not session_id:
             return
 
-        user_entry = {"role": "user", "content": user_message}
-        assistant_entry = {"role": "assistant", "content": assistant_message}
-        
-        if self.redis_client:
+        title = user_message[:50]
+        now = datetime.datetime.utcnow()
+
+        # MongoDB Route
+        if self.mongo_client:
             try:
-                key = f"session:{session_id}:memory"
-                # Store the new messages
-                await self.redis_client.rpush(key, json.dumps(user_entry))
-                await self.redis_client.rpush(key, json.dumps(assistant_entry))
+                # Upsert session
+                await self.sessions_col.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"updated_at": now}, "$setOnInsert": {"title": title}},
+                    upsert=True
+                )
                 
-                # Trim the history to max_history (multiply by 2 because each interaction has 2 messages)
-                await self.redis_client.ltrim(key, -(self.max_history * 2), -1)
+                # Insert messages
+                await self.messages_col.insert_many([
+                    {"session_id": session_id, "role": "user", "content": user_message, "created_at": now},
+                    {"session_id": session_id, "role": "assistant", "content": assistant_message, "created_at": now + datetime.timedelta(milliseconds=10)}
+                ])
                 
-                # Set an expiry for the session memory (e.g., 24 hours)
-                await self.redis_client.expire(key, 86400)
+                # Enforce max history in MongoDB
+                count = await self.messages_col.count_documents({"session_id": session_id})
+                max_msgs = self.max_history * 2
+                if count > max_msgs:
+                    excess = count - max_msgs
+                    old_docs = await self.messages_col.find({"session_id": session_id}).sort("created_at", 1).limit(excess).to_list(length=excess)
+                    old_ids = [doc["_id"] for doc in old_docs]
+                    await self.messages_col.delete_many({"_id": {"$in": old_ids}})
+                    
                 return
             except Exception as e:
-                logger.warning(f"Redis add_interaction failed for {session_id}: {e}")
+                logger.warning(f"MongoDB add_interaction failed for {session_id}: {e}")
 
         # SQLite Database fallback logic
         try:
-            title = user_message[:50]
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,))
