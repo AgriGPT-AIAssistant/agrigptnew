@@ -6,5 +6,4 @@ venv/
 env/
 .env
 .git/
-artifacts/
 data/
