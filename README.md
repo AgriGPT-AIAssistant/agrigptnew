@@ -1,146 +1,64 @@
-# AgriGPT Full-Stack AI Chatbot Foundation
+# AgriGPT: AI-Powered Agricultural Intelligence
 
-AgriGPT is a domain-constrained AI assistant platform for agricultural advice. This repository houses the modular, production-ready foundation for both the frontend (Next.js 15 App Router) and backend (FastAPI).
-
----
-
-## Folder Structure
-
-```
-agrigpt-workspace/
-├── frontend/                 # Next.js 15 app
-│   ├── src/
-│   │   ├── app/              # Root page, global styling, react query providers
-│   │   ├── components/
-│   │   │   ├── chat/         # Chat layout elements (sidebar, top navbar, windows, input, messages)
-│   │   │   └── ui/           # Custom UI buttons, inputs, avatars
-│   │   ├── lib/              # Tailwind merge utility classes
-│   │   ├── services/         # Axios client and streaming api layer
-│   │   ├── store/            # Zustand client state engine
-│   │   └── types/            # TypeScript interfaces
-│   └── package.json
-│
-└── backend/                  # FastAPI app
-    ├── app/
-    │   ├── core/             # Application config and settings validation
-    │   ├── routes/           # REST endpoints (health and chat placeholders)
-    │   ├── services/         # Service layer (AI orchestration placeholders)
-    │   └── schemas/          # Pydantic request and response schemas
-    ├── requirements.txt
-    ├── .env
-    └── .env.example
-```
+AgriGPT is an advanced, domain-constrained AI assistant built exclusively for Telangana farmers. It provides expert crop guidance, weather intelligence, market insights, and farming recommendations powered by an elite Hybrid Search RAG (Retrieval-Augmented Generation) pipeline.
 
 ---
 
-## Tech Stack Details
+## 🚀 Key Features
 
-### Frontend
+*   **Hybrid Retrieval Pipeline (RAG):** Combines dense vector search (FAISS) with sparse term matching (BM25) and Cross-Encoder reranking (`BAAI/bge-reranker-base`) for mathematically precise document retrieval.
+*   **Semantic Deduplication:** Ensures LLM prompts are maximally token-efficient by actively dropping redundant contexts (`cosine similarity > 0.88`).
+*   **Intelligent Routing:** Employs Native JSON Function Calling (`tool_choice`) to intelligently route queries to the RAG database, Live Weather APIs, or Tavily Web Search.
+*   **Fail-Safe Architecture:** Features a robust API Key Management System with Round-Robin key rotation and Circuit Breaker functionality (Provider Health Tracking).
+*   **Stateful Memory:** Stores user chat history persistently using a local SQLite database (`chat_history.db`) with a Redis fallback structure, allowing instant retrieval of past conversations.
+
+---
+
+## 🛠 Tech Stack
+
+### Frontend (User Interface)
 - **Framework**: Next.js 15 (App Router, React 19)
-- **Styling**: Tailwind CSS v4, custom HSL themed variables, Glassmorphism utilities
-- **State Management**: Zustand
-- **Query Caching**: TanStack React Query
-- **Network Requests**: Axios, native Fetch for Server-Sent Events (SSE) streaming
+- **Styling**: Tailwind CSS v4, custom HSL themed variables, Glassmorphism UI
+- **State Management**: Zustand (with persistent SQLite backend fetching)
+- **Streaming**: Native Server-Sent Events (SSE)
 
-### Backend
+### Backend (AI Orchestration)
 - **Framework**: FastAPI (Python 3.12)
-- **Settings Validation**: Pydantic Settings v2
-- **Server**: Uvicorn
+- **Models**: Groq / OpenRouter (`llama-3.1-8b-instant`, `llama-3.3-70b-instruct`)
+- **Embeddings/Reranker**: `sentence-transformers` (`BAAI/bge-small-en-v1.5`, `BAAI/bge-reranker-base`)
+- **Vector DB**: FAISS & BM25 Pickles
+- **Integrations**: OpenWeatherMap API, Tavily Advanced Search API
 
 ---
 
-## Getting Started
+## 📦 Local Development
 
-### 1. Backend Setup & Run
-
-Navigate to the `backend/` directory and activate the virtual environment:
-
+### 1. Backend Setup
 ```bash
 cd backend
-
-# On Windows:
-venv\Scripts\activate
-
-# On Unix/macOS:
-source venv/bin/activate
-```
-
-Install requirements (already initialized):
-```bash
+python -m venv venv
+venv\Scripts\activate      # Windows
+# source venv/bin/activate # Unix
 pip install -r requirements.txt
 ```
+Make sure your `.env` is configured with `GROQ_API_KEYS`, `OPENROUTER_API_KEYS`, `TAVILY_API_KEYS`, `WEATHER_API_KEYS`, and `HF_TOKEN`.
 
-Run development server:
+Start the backend:
 ```bash
-python app/main.py
+python -m uvicorn app.main:app --reload
 ```
-*The API docs will be available at `http://localhost:8000/docs`.*
+API runs on `http://localhost:8000`.
 
----
-
-### 2. Frontend Setup & Run
-
-Navigate to the `frontend/` directory:
-
+### 2. Frontend Setup
 ```bash
 cd frontend
-```
-
-Install packages:
-```bash
 npm install
-```
-
-Run development server:
-```bash
 npm run dev
 ```
-*The web interface will open at `http://localhost:3000`.*
+Dashboard runs on `http://localhost:3000`.
 
 ---
 
-## API Contract
+## 🌍 Deployment
 
-### Health Check
-- **GET** `/api/v1/health`
-- Response:
-  ```json
-  {
-    "status": "healthy",
-    "service": "AgriGPT API",
-    "version": "1.0.0"
-  }
-  ```
-
-### Chat Interaction (Standard JSON)
-- **POST** `/api/v1/chat`
-- Payload:
-  ```json
-  {
-    "message": "My crop leaves are turning yellow.",
-    "session_id": "optional-uuid"
-  }
-  ```
-- Response:
-  ```json
-  {
-    "session_id": "sess_...",
-    "message": {
-      "id": "msg_...",
-      "role": "assistant",
-      "content": "Advice summary...",
-      "created_at": "2026-05-29T04:00:00Z"
-    }
-  }
-  ```
-
-### Chat Stream (Server-Sent Events)
-- **POST** `/api/v1/chat/stream`
-- Payload: Same as standard chat.
-- Response: Content-Type: `text/event-stream` returning data chunks:
-  ```
-  data: word-1
-  data: word-2
-  ...
-  data: [DONE]
-  ```
+See the `deployment_guide.md` artifact in the conversation history for comprehensive instructions on deploying the Frontend to **Vercel** and the Backend to **Hugging Face Spaces**.
