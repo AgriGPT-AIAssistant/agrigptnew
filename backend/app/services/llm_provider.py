@@ -4,17 +4,30 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 import httpx
 
 from app.core.config import settings
+from app.services.key_manager import KeyRotator, ProviderHealthTracker
 
 logger = logging.getLogger("agrigpt.services.llm_provider")
 
 class LLMProvider:
     """
     Unified async client for Groq and OpenRouter endpoints.
-    Handles primary provider selection, failover recovery, standard responses, and async streaming.
+    Handles primary provider selection, failover recovery, robust key rotation, and circuit breakers.
     """
     def __init__(self):
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
+
+        # Initialize API Key Rotators
+        self.rotators = {
+            "groq": KeyRotator("groq", settings.GROQ_API_KEYS),
+            "openrouter": KeyRotator("openrouter", settings.OPENROUTER_API_KEYS)
+        }
+
+        # Initialize Circuit Breakers (Health Trackers)
+        self.health_trackers = {
+            "groq": ProviderHealthTracker("groq", max_failures=3, cooldown_seconds=60),
+            "openrouter": ProviderHealthTracker("openrouter", max_failures=3, cooldown_seconds=60)
+        }
 
     def _determine_provider(self, override_provider: Optional[str] = None) -> str:
         prov = override_provider or settings.LLM_PROVIDER
@@ -23,10 +36,10 @@ class LLMProvider:
             if prov in ("groq", "openrouter"):
                 return prov
 
-        # Auto-selection based on API key presence
-        if settings.GROQ_API_KEY:
+        # Auto-selection based on active keys
+        if self.rotators["groq"].active_keys:
             return "groq"
-        elif settings.OPENROUTER_API_KEY:
+        elif self.rotators["openrouter"].active_keys:
             return "openrouter"
         
         return "groq"
@@ -34,6 +47,7 @@ class LLMProvider:
     def _get_headers_and_payload(
         self,
         provider: str,
+        api_key: str,
         messages: List[Dict[str, str]],
         stream: bool,
         model_name: Optional[str] = None,
@@ -54,27 +68,22 @@ class LLMProvider:
 
         if provider == "groq":
             url = self.groq_url
-            api_key = settings.GROQ_API_KEY or ""
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
-            # Use requested model_name or fallback to default
             model = model_name or settings.GROQ_MODEL
             payload["model"] = model
-            # Groq chat API parameter: max_completion_tokens
             payload["max_completion_tokens"] = 1500
 
         else: # openrouter
             url = self.openrouter_url
-            api_key = settings.OPENROUTER_API_KEY or ""
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/agrigpt",
                 "X-Title": "AgriGPT"
             }
-            # Use requested model_name or mapping
             model = model_name
             if model == "llama-3.1-8b-instant":
                 model = "meta-llama/llama-3.2-3b-instruct:free"
@@ -84,7 +93,6 @@ class LLMProvider:
                 model = settings.OPENROUTER_RESP
             payload["model"] = model
             payload["max_tokens"] = 1500
-
 
         return url, headers, payload
 
@@ -101,36 +109,63 @@ class LLMProvider:
         providers_to_try = [primary_provider]
         
         alt_provider = "openrouter" if primary_provider == "groq" else "groq"
-        if alt_provider == "groq" and settings.GROQ_API_KEY:
-            providers_to_try.append(alt_provider)
-        elif alt_provider == "openrouter" and settings.OPENROUTER_API_KEY:
+        if self.rotators[alt_provider].active_keys:
             providers_to_try.append(alt_provider)
 
         last_error = None
         for prov in providers_to_try:
-            try:
-                url, headers, payload = self._get_headers_and_payload(
-                    prov, messages, stream=False, model_name=model_name, temperature=temperature,
-                    tools=tools, tool_choice=tool_choice
-                )
-                logger.info(f"Sending standard chat completion to {prov} using model {payload.get('model')}")
-                
-                async with httpx.AsyncClient(timeout=45.0) as client:
-                    response = await client.post(url, headers=headers, json=payload)
-                    if response.status_code != 200:
-                        raise Exception(f"HTTP {response.status_code}: {response.text}")
+            tracker = self.health_trackers[prov]
+            if not tracker.is_healthy():
+                logger.warning(f"Skipping {prov} - circuit is open (cooling down).")
+                continue
+
+            rotator = self.rotators[prov]
+            
+            # Key rotation loop
+            while True:
+                api_key = rotator.get_key()
+                if not api_key:
+                    logger.error(f"No active API keys left for {prov}.")
+                    break
+
+                try:
+                    url, headers, payload = self._get_headers_and_payload(
+                        prov, api_key, messages, stream=False, model_name=model_name, temperature=temperature,
+                        tools=tools, tool_choice=tool_choice
+                    )
+                    logger.info(f"Sending standard chat completion to {prov} using model {payload.get('model')}")
                     
-                    data = response.json()
-                    choices = data.get("choices", [])
-                    if choices:
-                        message = choices[0].get("message", {})
-                        if message.get("tool_calls"):
-                            return message["tool_calls"][0]["function"]["arguments"].strip()
-                        return message.get("content", "").strip()
-                    raise Exception("Empty choices list received")
-            except Exception as e:
-                logger.warning(f"Failed standard completion on provider '{prov}': {str(e)}")
-                last_error = e
+                    async with httpx.AsyncClient(timeout=45.0) as client:
+                        response = await client.post(url, headers=headers, json=payload)
+                        
+                        if response.status_code == 401:
+                            rotator.disable_key(api_key)
+                            continue # Try next key immediately
+                            
+                        if response.status_code != 200:
+                            if response.status_code == 429:
+                                tracker.record_failure()
+                                break # Rate limited across the provider/key, break to try alt_provider
+                            raise Exception(f"HTTP {response.status_code}: {response.text}")
+                        
+                        tracker.record_success()
+                        data = response.json()
+                        choices = data.get("choices", [])
+                        if choices:
+                            message = choices[0].get("message", {})
+                            if message.get("tool_calls"):
+                                return message["tool_calls"][0]["function"]["arguments"].strip()
+                            return message.get("content", "").strip()
+                        raise Exception("Empty choices list received")
+                except httpx.TimeoutException as e:
+                    logger.warning(f"Timeout on provider '{prov}'")
+                    tracker.record_failure()
+                    last_error = e
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed standard completion on provider '{prov}': {str(e)}")
+                    last_error = e
+                    break
 
         raise last_error or Exception("All configured LLM providers failed to generate a response.")
 
@@ -145,9 +180,7 @@ class LLMProvider:
         providers_to_try = [primary_provider]
         
         alt_provider = "openrouter" if primary_provider == "groq" else "groq"
-        if alt_provider == "groq" and settings.GROQ_API_KEY:
-            providers_to_try.append(alt_provider)
-        elif alt_provider == "openrouter" and settings.OPENROUTER_API_KEY:
+        if self.rotators[alt_provider].active_keys:
             providers_to_try.append(alt_provider)
 
         last_error = None
@@ -156,40 +189,68 @@ class LLMProvider:
         for prov in providers_to_try:
             if stream_started:
                 break
-            try:
-                url, headers, payload = self._get_headers_and_payload(
-                    prov, messages, stream=True, model_name=model_name, temperature=temperature
-                )
-                logger.info(f"Initiating stream chat completion with {prov} using model {payload.get('model')}")
+                
+            tracker = self.health_trackers[prov]
+            if not tracker.is_healthy():
+                logger.warning(f"Skipping {prov} - circuit is open (cooling down).")
+                continue
 
-                async with httpx.AsyncClient(timeout=45.0) as client:
-                    async with client.stream("POST", url, headers=headers, json=payload) as response:
-                        if response.status_code != 200:
-                            error_text = await response.aread()
-                            raise Exception(f"HTTP {response.status_code}: {error_text.decode('utf-8')}")
-                        
-                        stream_started = True
-                        async for line in response.aiter_lines():
-                            line = line.strip()
-                            if not line:
+            rotator = self.rotators[prov]
+            
+            while True:
+                api_key = rotator.get_key()
+                if not api_key:
+                    break
+
+                try:
+                    url, headers, payload = self._get_headers_and_payload(
+                        prov, api_key, messages, stream=True, model_name=model_name, temperature=temperature
+                    )
+                    logger.info(f"Initiating stream chat completion with {prov} using model {payload.get('model')}")
+
+                    async with httpx.AsyncClient(timeout=45.0) as client:
+                        async with client.stream("POST", url, headers=headers, json=payload) as response:
+                            if response.status_code == 401:
+                                rotator.disable_key(api_key)
                                 continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
+                                
+                            if response.status_code != 200:
+                                if response.status_code == 429:
+                                    tracker.record_failure()
                                     break
-                                try:
-                                    data_json = json.loads(data_str)
-                                    choices = data_json.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content = delta.get("content", "")
-                                        if content:
-                                            yield content
-                                except Exception:
+                                error_text = await response.aread()
+                                raise Exception(f"HTTP {response.status_code}: {error_text.decode('utf-8')}")
+                            
+                            stream_started = True
+                            tracker.record_success()
+                            async for line in response.aiter_lines():
+                                line = line.strip()
+                                if not line:
                                     continue
-            except Exception as e:
-                logger.warning(f"Failed streaming completion on provider '{prov}': {str(e)}")
-                last_error = e
+                                if line.startswith("data: "):
+                                    data_str = line[6:].strip()
+                                    if data_str == "[DONE]":
+                                        break
+                                    try:
+                                        data_json = json.loads(data_str)
+                                        choices = data_json.get("choices", [])
+                                        if choices:
+                                            delta = choices[0].get("delta", {})
+                                            content = delta.get("content", "")
+                                            if content:
+                                                yield content
+                                    except Exception:
+                                        continue
+                            break
+                except httpx.TimeoutException as e:
+                    logger.warning(f"Streaming timeout on provider '{prov}'")
+                    tracker.record_failure()
+                    last_error = e
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed streaming completion on provider '{prov}': {str(e)}")
+                    last_error = e
+                    break
 
         if not stream_started:
             raise last_error or Exception("All configured LLM providers failed to initialize stream.")

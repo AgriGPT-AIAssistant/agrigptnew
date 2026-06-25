@@ -1,13 +1,19 @@
+import re
 import logging
 from typing import Dict, Any, List, Optional
 import httpx
 
 from app.core.config import settings
+from app.services.key_manager import KeyRotator, ProviderHealthTracker
 
 logger = logging.getLogger("agrigpt.services.tools")
 
 class WeatherTool:
     BASE_URL = "http://api.openweathermap.org/data/2.5/weather"
+
+    def __init__(self):
+        self.rotator = KeyRotator("openweathermap", settings.WEATHER_API_KEYS)
+        self.health_tracker = ProviderHealthTracker("openweathermap", max_failures=3, cooldown_seconds=60)
 
     def _farming_advice(self, temp: float, humidity: int, desc: str) -> str:
         if temp > 38:
@@ -23,38 +29,57 @@ class WeatherTool:
         return "Normal farming conditions — proceed with regular activities."
 
     async def get_weather(self, city: str = "Hyderabad") -> Dict[str, Any]:
-        api_key = settings.WEATHER_API_KEY
-        if not api_key:
-            logger.warning("WeatherTool: No weather API key configured. Using default mock weather.")
+        if not self.health_tracker.is_healthy():
+            logger.warning("WeatherTool: Circuit is open (cooldown). Using mock weather.")
             return self._mock_weather(city)
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    self.BASE_URL,
-                    params={"q": f"{city},IN", "appid": api_key, "units": "metric"}
-                )
-                if resp.status_code == 200:
-                    d = resp.json()
-                    temp = d["main"]["temp"]
-                    hum = d["main"]["humidity"]
-                    desc = d["weather"][0]["description"]
-                    return {
-                        "success": True,
-                        "city": d.get("name", city),
-                        "temperature": round(temp, 1),
-                        "feels_like": round(d["main"]["feels_like"], 1),
-                        "humidity": hum,
-                        "description": desc,
-                        "wind_speed": round(d["wind"]["speed"], 1),
-                        "advice": self._farming_advice(temp, hum, desc),
-                        "source": "api",
-                    }
-                else:
-                    logger.warning(f"Weather API status code {resp.status_code}: {resp.text}")
-        except Exception as e:
-            logger.warning(f"WeatherTool error: {e}")
-            
+        while True:
+            api_key = self.rotator.get_key()
+            if not api_key:
+                logger.warning("WeatherTool: No active API keys left. Using mock weather.")
+                return self._mock_weather(city)
+
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(
+                        self.BASE_URL,
+                        params={"q": f"{city},IN", "appid": api_key, "units": "metric"}
+                    )
+                    
+                    if resp.status_code == 401:
+                        self.rotator.disable_key(api_key)
+                        continue # Try next key immediately
+
+                    if resp.status_code == 200:
+                        self.health_tracker.record_success()
+                        d = resp.json()
+                        temp = d["main"]["temp"]
+                        hum = d["main"]["humidity"]
+                        desc = d["weather"][0]["description"]
+                        return {
+                            "success": True,
+                            "city": d.get("name", city),
+                            "temperature": round(temp, 1),
+                            "feels_like": round(d["main"]["feels_like"], 1),
+                            "humidity": hum,
+                            "description": desc,
+                            "wind_speed": round(d["wind"]["speed"], 1),
+                            "advice": self._farming_advice(temp, hum, desc),
+                            "source": "api",
+                        }
+                    else:
+                        logger.warning(f"Weather API status code {resp.status_code}: {resp.text}")
+                        if resp.status_code == 429:
+                            self.health_tracker.record_failure()
+                        break
+            except httpx.TimeoutException:
+                logger.warning("WeatherTool: Connection timeout.")
+                self.health_tracker.record_failure()
+                break
+            except Exception as e:
+                logger.warning(f"WeatherTool error: {e}")
+                break
+                
         return self._mock_weather(city)
 
     def _mock_weather(self, city: str) -> Dict[str, Any]:
@@ -76,6 +101,10 @@ class WebSearchTool:
     TOP_RESULTS = 5
     MAX_CONTENT_CHARS = 500
     TOTAL_BUDGET = 2000
+
+    def __init__(self):
+        self.rotator = KeyRotator("tavily", settings.TAVILY_API_KEYS)
+        self.health_tracker = ProviderHealthTracker("tavily", max_failures=3, cooldown_seconds=60)
 
     def _make_search_query(self, query: str) -> str:
         q = query.strip()
@@ -124,33 +153,53 @@ class WebSearchTool:
         return " ".join(compressed) if compressed else content[:max_chars].rstrip() + "…"
 
     async def search(self, query: str) -> Dict[str, Any]:
-        api_key = settings.TAVILY_API_KEY
-        if not api_key:
-            logger.warning("WebSearchTool: No Tavily API key configured. Web search disabled.")
+        if not self.health_tracker.is_healthy():
+            logger.warning("WebSearchTool: Circuit is open (cooldown). Web search temporarily disabled.")
             return {"success": False, "context": "", "sources": [], "n_results": 0}
 
         search_query = self._make_search_query(query)
-        try:
-            url = "https://api.tavily.com/search"
-            payload = {
-                "api_key": api_key,
-                "query": search_query,
-                "max_results": self.MAX_RESULTS,
-                "search_depth": "advanced",
-                "include_answer": False,
-                "include_raw_content": False
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw_results = data.get("results", [])
-                else:
-                    logger.warning(f"Tavily search API failed: HTTP {resp.status_code}: {resp.text}")
-                    return {"success": False, "context": "", "sources": [], "n_results": 0}
-        except Exception as e:
-            logger.warning(f"WebSearchTool error: {e}")
-            return {"success": False, "context": "", "sources": [], "n_results": 0}
+        raw_results = []
+        
+        while True:
+            api_key = self.rotator.get_key()
+            if not api_key:
+                logger.warning("WebSearchTool: No active Tavily API keys left.")
+                return {"success": False, "context": "", "sources": [], "n_results": 0}
+
+            try:
+                url = "https://api.tavily.com/search"
+                payload = {
+                    "api_key": api_key,
+                    "query": search_query,
+                    "max_results": self.MAX_RESULTS,
+                    "search_depth": "advanced",
+                    "include_answer": False,
+                    "include_raw_content": False
+                }
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(url, json=payload)
+                    
+                    if resp.status_code == 401:
+                        self.rotator.disable_key(api_key)
+                        continue
+                        
+                    if resp.status_code == 200:
+                        self.health_tracker.record_success()
+                        data = resp.json()
+                        raw_results = data.get("results", [])
+                        break
+                    else:
+                        logger.warning(f"Tavily search API failed: HTTP {resp.status_code}: {resp.text}")
+                        if resp.status_code == 429:
+                            self.health_tracker.record_failure()
+                        break
+            except httpx.TimeoutException:
+                logger.warning("WebSearchTool: Connection timeout.")
+                self.health_tracker.record_failure()
+                break
+            except Exception as e:
+                logger.warning(f"WebSearchTool error: {e}")
+                break
 
         if not raw_results:
             return {"success": False, "context": "", "sources": [], "n_results": 0}

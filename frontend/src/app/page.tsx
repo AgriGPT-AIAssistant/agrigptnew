@@ -25,17 +25,30 @@ export default function Home() {
     setIsLoading,
     setError,
     isSidebarOpen,
-    toggleSidebar
+    toggleSidebar,
+    loadBackendSessions,
+    loadSessionHistory
   } = useChatStore();
 
-  // Handle client-side mount check to prevent hydration mismatch
+  // Handle client-side mount and backend hydration
   useEffect(() => {
     setMounted(true);
-    // Auto-create first session if list is empty
-    if (useChatStore.getState().sessions.length === 0) {
-      createSession('AgriGPT Session');
+    
+    // Load sessions from SQLite via backend
+    loadBackendSessions().then(() => {
+      // Auto-create first session if list is empty after backend fetch
+      if (useChatStore.getState().sessions.length === 0) {
+        createSession('AgriGPT Session');
+      }
+    });
+  }, [createSession, loadBackendSessions]);
+
+  // Load history when activeSessionId changes
+  useEffect(() => {
+    if (activeSessionId) {
+      loadSessionHistory(activeSessionId);
     }
-  }, [createSession]);
+  }, [activeSessionId, loadSessionHistory]);
 
   const handleSendMessage = async (content: string) => {
     let currentSessionId = activeSessionId;

@@ -11,6 +11,16 @@ export const chatService = {
     return response.data;
   },
 
+  async getSessions(): Promise<any> {
+    const response = await api.get('/chat/sessions');
+    return response.data;
+  },
+
+  async getHistory(sessionId: string): Promise<any> {
+    const response = await api.get(`/chat/history/${sessionId}`);
+    return response.data;
+  },
+
   /**
    * SSE Stream connection that reads chunked response buffers in real time
    */

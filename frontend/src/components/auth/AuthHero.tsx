@@ -5,11 +5,21 @@ import { motion } from 'framer-motion';
 import { Sprout, CloudSun, LineChart, Brain } from 'lucide-react';
 
 export const AuthHero: React.FC = () => {
+  const [mounted, setMounted] = React.useState(false);
+  
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const features = [
     { icon: Brain, label: 'Advanced Agronomy Model', desc: 'Custom RAG pipeline tuned for regional crops.' },
     { icon: CloudSun, label: 'Weather Intelligence', desc: 'Real-time farm advisory based on local humidity & rain.' },
     { icon: LineChart, label: 'Market Insights & Trends', desc: 'Strategic market intelligence to maximize mandi pricing.' },
   ];
+
+  if (!mounted) {
+    return <div className="h-full w-full" />; // Empty placeholder to avoid SSR hydration mismatch
+  }
 
   return (
     <div className="relative flex flex-col justify-between h-full p-8 md:p-16 text-foreground z-10 select-none">

@@ -204,20 +204,7 @@ export function Sidebar() {
                     <User className="w-4 h-4 text-muted-foreground" />
                     👤 My Profile
                   </button>
-                  <button
-                    onClick={() => { setUserMenuOpen(false); setSettingsModalOpen(true); }}
-                    className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-xs text-slate-700 hover:bg-secondary hover:text-foreground text-left cursor-pointer transition-colors"
-                  >
-                    <SettingsIcon className="w-4 h-4 text-muted-foreground" />
-                    ⚙ Settings
-                  </button>
-                  <button
-                    onClick={() => { setUserMenuOpen(false); setUsageModalOpen(true); }}
-                    className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-xs text-slate-700 hover:bg-secondary hover:text-foreground text-left cursor-pointer transition-colors"
-                  >
-                    <BarChart3 className="w-4 h-4 text-muted-foreground" />
-                    📊 Usage
-                  </button>
+
                   <div className="h-[1px] bg-border my-1 mx-2" />
                   <button
                     onClick={handleLogout}

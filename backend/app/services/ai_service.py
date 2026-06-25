@@ -197,7 +197,7 @@ class AIService:
             messages.append({"role": "user", "content": f'Farmer query: "{question}"'})
             raw_json = await llm_provider.generate_response(
                 messages=messages,
-                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEY else settings.OPENROUTER_AGENT,
+                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_AGENT,
                 temperature=0.0,
                 tools=ROUTING_TOOLS,
                 tool_choice={"type": "function", "function": {"name": "route_and_extract_city"}}
@@ -391,7 +391,7 @@ class AIService:
 
             response_text = await llm_provider.generate_response(
                 messages=messages,
-                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEY else settings.OPENROUTER_RESP,
+                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_RESP,
                 temperature=0.7
             )
 
@@ -497,7 +497,7 @@ class AIService:
 
             stream_gen = llm_provider.generate_stream(
                 messages=messages,
-                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEY else settings.OPENROUTER_RESP,
+                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_RESP,
                 temperature=0.7
             )
 
@@ -533,7 +533,7 @@ class AIService:
                     })
 
             completed_data = {
-                "model": settings.GROQ_MODEL if settings.GROQ_API_KEY else settings.OPENROUTER_RESP,
+                "model": settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_RESP,
                 "latency_s": latency_s,
                 "tools_used": active_tools,
                 "sources": sources
