@@ -9,14 +9,14 @@ logger = logging.getLogger("agrigpt.dependencies.auth")
 
 # Retrieve configured google client ID from environment
 GOOGLE_CLIENT_ID = os.getenv("AUTH_GOOGLE_ID") or os.getenv("GOOGLE_CLIENT_ID")
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
 async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
     """
     FastAPI dependency to authenticate requests using Google ID Token.
     In development, falls back to a mock developer user if headers are missing or keys are unconfigured.
     """
-    is_dev = ENVIRONMENT != "production"
+    is_dev = ENVIRONMENT.lower() == "development"
     
     if not authorization:
         if is_dev:
