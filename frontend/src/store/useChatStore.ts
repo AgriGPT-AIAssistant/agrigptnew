@@ -19,6 +19,7 @@ interface ChatState {
   setIsLoading: (loading: boolean) => void;
   setError: (err: string | null) => void;
   clearSessionMessages: (sessionId: string) => void;
+  resetStore: () => void;
   
   // Backend Integration
   loadBackendSessions: () => Promise<void>;
@@ -198,5 +199,6 @@ export const useChatStore = create<ChatState>((set) => ({
       }),
     }));
   },
+  resetStore: () => set({ sessions: [], activeSessionId: null, error: null, isLoading: false }),
 }));
 

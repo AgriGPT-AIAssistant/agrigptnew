@@ -324,11 +324,11 @@ class AIService:
 
     # ── Public Endpoints API Integration ─────────────────────────────────────
 
-    async def generate_response(self, message: str, session_id: str) -> ChatResponse:
+    async def generate_response(self, message: str, session_id: str, user_id: str = "dev-user") -> ChatResponse:
         """Standard JSON API response generator with memory injection."""
         try:
             # Fetch history early to inject into Router
-            history = await self.memory_manager.get_history(session_id)
+            history = await self.memory_manager.get_history(session_id, user_id=user_id)
             
             # 1. Scope + Route
             routing = await self._route(message, history=history[-4:])  # inject last 4 messages to router
@@ -398,7 +398,7 @@ class AIService:
             cleaned_text = ResponseValidator.validate_and_clean(response_text)
             
             # Save interaction to memory
-            await self.memory_manager.add_interaction(session_id, message, cleaned_text)
+            await self.memory_manager.add_interaction(session_id, message, cleaned_text, user_id=user_id)
 
             return ChatResponse(
                 session_id=session_id,
@@ -414,12 +414,12 @@ class AIService:
             logger.error(f"Failure in response generation: {str(e)}", exc_info=True)
             raise e
 
-    async def generate_stream(self, message: str, session_id: str) -> AsyncGenerator[str, None]:
+    async def generate_stream(self, message: str, session_id: str, user_id: str = "dev-user") -> AsyncGenerator[str, None]:
         """SSE streaming API tokens generator with detailed progress state events and memory injection."""
         request_start_time = time.time()
         try:
             # Fetch history early to inject into Router
-            history = await self.memory_manager.get_history(session_id)
+            history = await self.memory_manager.get_history(session_id, user_id=user_id)
             
             # 1. Emit Initial State
             yield self._format_sse_event("thinking_started")
@@ -509,7 +509,7 @@ class AIService:
                     
             # Save interaction to memory after completion
             cleaned_response = ResponseValidator.validate_and_clean(full_response)
-            await self.memory_manager.add_interaction(session_id, message, cleaned_response)
+            await self.memory_manager.add_interaction(session_id, message, cleaned_response, user_id=user_id)
 
             # 7. Collect metadata & sources, and emit completion details
             latency_s = round(time.time() - request_start_time, 2)

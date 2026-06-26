@@ -48,12 +48,13 @@ class MemoryManager:
             logger.info("No MONGO_URI configured or motor not installed. Using local SQLite database.")
 
     def _init_sqlite_db(self):
-        """Initializes the local SQLite database for persistent history fallback."""
+        """Initializes the local SQLite database for persistent history fallback with proper user_id support."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
+                        user_id TEXT,
                         title TEXT,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -62,24 +63,61 @@ class MemoryManager:
                     CREATE TABLE IF NOT EXISTS messages (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT,
+                        user_id TEXT,
                         role TEXT,
                         content TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (session_id) REFERENCES sessions (session_id)
                     )
                 ''')
+                
+                # Check if user_id column exists in sessions, if not, add it
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(sessions)")
+                columns = [info[1] for info in cursor.fetchall()]
+                if "user_id" not in columns:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+                    
+                # Check if user_id column exists in messages, if not, add it
+                cursor.execute("PRAGMA table_info(messages)")
+                columns = [info[1] for info in cursor.fetchall()]
+                if "user_id" not in columns:
+                    conn.execute("ALTER TABLE messages ADD COLUMN user_id TEXT")
         except Exception as e:
             logger.error(f"Failed to initialize SQLite database: {e}")
 
-    async def get_history(self, session_id: str) -> List[Dict[str, str]]:
-        """Retrieve recent conversation history for a given session."""
+    async def get_history(self, session_id: str, user_id: str = "dev-user") -> List[Dict[str, str]]:
+        """Retrieve recent conversation history for a given session, isolated by user_id."""
         if not session_id:
             return []
+
+        # Enforce strict ownership check if the session already exists
+        if self.mongo_client:
+            try:
+                session_doc = await self.sessions_col.find_one({"session_id": session_id})
+                if session_doc and session_doc.get("user_id") != user_id:
+                    raise PermissionError("Access denied to conversation session.")
+            except PermissionError:
+                raise
+            except Exception as e:
+                logger.warning(f"MongoDB ownership check failed: {e}")
+        else:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT user_id FROM sessions WHERE session_id = ?", (session_id,))
+                    row = cursor.fetchone()
+                    if row and row[0] != user_id:
+                        raise PermissionError("Access denied to conversation session.")
+            except PermissionError:
+                raise
+            except Exception as e:
+                logger.warning(f"SQLite ownership check failed: {e}")
 
         # MongoDB Route
         if self.mongo_client:
             try:
-                cursor = self.messages_col.find({"session_id": session_id}).sort("created_at", 1)
+                cursor = self.messages_col.find({"session_id": session_id, "user_id": user_id}).sort("created_at", 1)
                 messages = await cursor.to_list(length=100)
                 history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
                 return history[-(self.max_history * 2):] if history else []
@@ -91,8 +129,8 @@ class MemoryManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", 
-                    (session_id,)
+                    "SELECT role, content FROM messages WHERE session_id = ? AND user_id = ? ORDER BY id ASC", 
+                    (session_id, user_id)
                 )
                 rows = cursor.fetchall()
                 history = [{"role": row[0], "content": row[1]} for row in rows]
@@ -101,12 +139,12 @@ class MemoryManager:
             logger.error(f"SQLite get_history failed for {session_id}: {e}")
             return []
 
-    async def get_sessions(self) -> List[Dict[str, str]]:
-        """Retrieve a list of all active sessions and their titles."""
+    async def get_sessions(self, user_id: str = "dev-user") -> List[Dict[str, str]]:
+        """Retrieve a list of all active sessions and their titles, isolated by user_id."""
         # MongoDB Route
         if self.mongo_client:
             try:
-                cursor = self.sessions_col.find({}).sort("updated_at", -1)
+                cursor = self.sessions_col.find({"user_id": user_id}).sort("updated_at", -1)
                 sessions = await cursor.to_list(length=100)
                 return [{"session_id": s["session_id"], "title": s.get("title", "New Chat")} for s in sessions]
             except Exception as e:
@@ -116,15 +154,15 @@ class MemoryManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT session_id, title FROM sessions ORDER BY updated_at DESC")
+                cursor.execute("SELECT session_id, title FROM sessions WHERE user_id = ? ORDER BY updated_at DESC", (user_id,))
                 rows = cursor.fetchall()
                 return [{"session_id": row[0], "title": row[1]} for row in rows]
         except Exception as e:
             logger.error(f"SQLite get_sessions failed: {e}")
             return []
 
-    async def add_interaction(self, session_id: str, user_message: str, assistant_message: str):
-        """Append a user-assistant interaction pair to the memory."""
+    async def add_interaction(self, session_id: str, user_message: str, assistant_message: str, user_id: str = "dev-user"):
+        """Append a user-assistant interaction pair to the memory, isolated by user_id."""
         if not session_id:
             return
 
@@ -136,23 +174,23 @@ class MemoryManager:
             try:
                 # Upsert session
                 await self.sessions_col.update_one(
-                    {"session_id": session_id},
+                    {"session_id": session_id, "user_id": user_id},
                     {"$set": {"updated_at": now}, "$setOnInsert": {"title": title}},
                     upsert=True
                 )
                 
                 # Insert messages
                 await self.messages_col.insert_many([
-                    {"session_id": session_id, "role": "user", "content": user_message, "created_at": now},
-                    {"session_id": session_id, "role": "assistant", "content": assistant_message, "created_at": now + datetime.timedelta(milliseconds=10)}
+                    {"session_id": session_id, "user_id": user_id, "role": "user", "content": user_message, "created_at": now},
+                    {"session_id": session_id, "user_id": user_id, "role": "assistant", "content": assistant_message, "created_at": now + datetime.timedelta(milliseconds=10)}
                 ])
                 
                 # Enforce max history in MongoDB
-                count = await self.messages_col.count_documents({"session_id": session_id})
+                count = await self.messages_col.count_documents({"session_id": session_id, "user_id": user_id})
                 max_msgs = self.max_history * 2
                 if count > max_msgs:
                     excess = count - max_msgs
-                    old_docs = await self.messages_col.find({"session_id": session_id}).sort("created_at", 1).limit(excess).to_list(length=excess)
+                    old_docs = await self.messages_col.find({"session_id": session_id, "user_id": user_id}).sort("created_at", 1).limit(excess).to_list(length=excess)
                     old_ids = [doc["_id"] for doc in old_docs]
                     await self.messages_col.delete_many({"_id": {"$in": old_ids}})
                     
@@ -164,27 +202,27 @@ class MemoryManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,))
+                cursor.execute("SELECT session_id FROM sessions WHERE session_id = ? AND user_id = ?", (session_id, user_id))
                 if not cursor.fetchone():
-                    conn.execute("INSERT INTO sessions (session_id, title) VALUES (?, ?)", (session_id, title))
+                    conn.execute("INSERT INTO sessions (session_id, user_id, title) VALUES (?, ?, ?)", (session_id, user_id, title))
                 else:
-                    conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?", (session_id,))
+                    conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?", (session_id, user_id))
                     
                 conn.execute(
-                    "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                    (session_id, "user", user_message)
+                    "INSERT INTO messages (session_id, user_id, role, content) VALUES (?, ?, ?, ?)",
+                    (session_id, user_id, "user", user_message)
                 )
                 conn.execute(
-                    "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                    (session_id, "assistant", assistant_message)
+                    "INSERT INTO messages (session_id, user_id, role, content) VALUES (?, ?, ?, ?)",
+                    (session_id, user_id, "assistant", assistant_message)
                 )
                 
                 # Enforce max history
-                cursor.execute("SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC", (session_id,))
+                cursor.execute("SELECT id FROM messages WHERE session_id = ? AND user_id = ? ORDER BY id DESC", (session_id, user_id))
                 rows = cursor.fetchall()
                 if len(rows) > self.max_history * 2:
                     keep_ids = [row[0] for row in rows[:self.max_history * 2]]
                     min_keep_id = min(keep_ids)
-                    conn.execute("DELETE FROM messages WHERE session_id = ? AND id < ?", (session_id, min_keep_id))
+                    conn.execute("DELETE FROM messages WHERE session_id = ? AND user_id = ? AND id < ?", (session_id, user_id, min_keep_id))
         except Exception as e:
             logger.error(f"SQLite add_interaction failed for {session_id}: {e}")

@@ -7,12 +7,29 @@ import { TopNavbar } from '@/components/chat/top-navbar';
 import { ChatWindow } from '@/components/chat/chat-window';
 import { ChatInput } from '@/components/chat/chat-input';
 import { chatService } from '@/services/chatService';
+import api from '@/services/api';
+import { useSession } from 'next-auth/react';
 import { Message, Step } from '@/types/chat';
 import { Sprout } from 'lucide-react';
 
 export default function Home() {
   const [statusText, setStatusText] = useState<string>('');
   const [mounted, setMounted] = useState(false);
+  const { data: session } = useSession();
+
+  useEffect(() => {
+    if (session?.id_token) {
+      api.defaults.headers.common['Authorization'] = `Bearer ${session.id_token}`;
+    } else {
+      const isDev = process.env.NODE_ENV === 'development';
+      const hasGoogleKeys = !!(process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID);
+      if (isDev && !hasGoogleKeys) {
+        api.defaults.headers.common['Authorization'] = 'Bearer mock-dev-token';
+      } else {
+        delete api.defaults.headers.common['Authorization'];
+      }
+    }
+  }, [session]);
   
   const {
     activeSessionId,
@@ -109,6 +126,7 @@ export default function Home() {
       await chatService.sendMessageStream(
         content,
         currentSessionId,
+        (session?.id_token as string) || '',
         (token) => {
           accumulatedContent += token;
           updateMessageContent(currentSessionId!, assistantMessageId, accumulatedContent);

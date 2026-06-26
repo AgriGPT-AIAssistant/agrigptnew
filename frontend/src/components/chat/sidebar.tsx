@@ -41,6 +41,7 @@ export function Sidebar() {
   };
 
   const handleLogout = () => {
+    useChatStore.getState().resetStore();
     signOut({ callbackUrl: '/auth' });
   };
 
