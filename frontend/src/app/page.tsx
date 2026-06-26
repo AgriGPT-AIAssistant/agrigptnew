@@ -15,22 +15,8 @@ import { Sprout } from 'lucide-react';
 export default function Home() {
   const [statusText, setStatusText] = useState<string>('');
   const [mounted, setMounted] = useState(false);
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
 
-  useEffect(() => {
-    if (session?.id_token) {
-      api.defaults.headers.common['Authorization'] = `Bearer ${session.id_token}`;
-    } else {
-      const isDev = process.env.NODE_ENV === 'development';
-      const hasGoogleKeys = !!(process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID);
-      if (isDev && !hasGoogleKeys) {
-        api.defaults.headers.common['Authorization'] = 'Bearer mock-dev-token';
-      } else {
-        delete api.defaults.headers.common['Authorization'];
-      }
-    }
-  }, [session]);
-  
   const {
     activeSessionId,
     sessions,
@@ -47,25 +33,49 @@ export default function Home() {
     loadSessionHistory
   } = useChatStore();
 
-  // Handle client-side mount and backend hydration
   useEffect(() => {
-    setMounted(true);
-    
-    // Load sessions from SQLite via backend
-    loadBackendSessions().then(() => {
-      // Auto-create first session if list is empty after backend fetch
-      if (useChatStore.getState().sessions.length === 0) {
-        createSession('AgriGPT Session');
-      }
-    });
-  }, [createSession, loadBackendSessions]);
+    if (status === 'loading') return;
 
-  // Load history when activeSessionId changes
+    const isDev = process.env.NODE_ENV === 'development';
+    const hasGoogleKeys = !!(process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID);
+    const isDevBypass = isDev && !hasGoogleKeys;
+
+    if (status === 'authenticated' && session?.id_token) {
+      api.defaults.headers.common['Authorization'] = `Bearer ${session.id_token}`;
+      setMounted(true);
+      
+      // Load sessions from SQLite/PostgreSQL via backend
+      loadBackendSessions().then(() => {
+        // Auto-create first session if list is empty after backend fetch
+        if (useChatStore.getState().sessions.length === 0) {
+          createSession('AgriGPT Session');
+        }
+      });
+    } else if (isDevBypass) {
+      api.defaults.headers.common['Authorization'] = 'Bearer mock-dev-token';
+      setMounted(true);
+      
+      // Load sessions from SQLite/PostgreSQL via backend
+      loadBackendSessions().then(() => {
+        // Auto-create first session if list is empty after backend fetch
+        if (useChatStore.getState().sessions.length === 0) {
+          createSession('AgriGPT Session');
+        }
+      });
+    } else {
+      // Unauthenticated / Logged Out: reset authorization header and store to prevent leaks
+      delete api.defaults.headers.common['Authorization'];
+      useChatStore.getState().resetStore();
+      setMounted(false);
+    }
+  }, [session, status, createSession, loadBackendSessions]);
+
+  // Load history when activeSessionId changes, only when authenticated/mounted
   useEffect(() => {
-    if (activeSessionId) {
+    if (activeSessionId && mounted) {
       loadSessionHistory(activeSessionId);
     }
-  }, [activeSessionId, loadSessionHistory]);
+  }, [activeSessionId, mounted, loadSessionHistory]);
 
   const handleSendMessage = async (content: string) => {
     let currentSessionId = activeSessionId;

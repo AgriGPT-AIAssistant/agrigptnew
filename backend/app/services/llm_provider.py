@@ -53,7 +53,8 @@ class LLMProvider:
         model_name: Optional[str] = None,
         temperature: float = 0.7,
         tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None
+        tool_choice: Optional[Any] = None,
+        response_format: Optional[Dict[str, Any]] = None
     ) -> tuple[str, Dict[str, str], Dict[str, Any]]:
         payload: Dict[str, Any] = {
             "messages": messages,
@@ -65,6 +66,8 @@ class LLMProvider:
             payload["tools"] = tools
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        if response_format:
+            payload["response_format"] = response_format
 
         if provider == "groq":
             url = self.groq_url
@@ -103,7 +106,8 @@ class LLMProvider:
         temperature: float = 0.7,
         provider_override: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None
+        tool_choice: Optional[Any] = None,
+        response_format: Optional[Dict[str, Any]] = None
     ) -> str:
         primary_provider = self._determine_provider(provider_override)
         providers_to_try = [primary_provider]
@@ -131,7 +135,7 @@ class LLMProvider:
                 try:
                     url, headers, payload = self._get_headers_and_payload(
                         prov, api_key, messages, stream=False, model_name=model_name, temperature=temperature,
-                        tools=tools, tool_choice=tool_choice
+                        tools=tools, tool_choice=tool_choice, response_format=response_format
                     )
                     logger.info(f"Sending standard chat completion to {prov} using model {payload.get('model')}")
                     

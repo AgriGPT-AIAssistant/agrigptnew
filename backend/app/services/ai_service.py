@@ -92,6 +92,7 @@ Response format (strict JSON):
   "use_rag": true or false,
   "use_web": true or false,
   "use_direct_llm": true or false,
+  "city_name": "the target city/village name if mentioned, otherwise ''",
   "reason": "one concise sentence explaining your routing decision"
 }
 """
@@ -117,10 +118,9 @@ ROUTING_TOOLS = [{
 }]
 
 _OUT_OF_SCOPE_REPLY = (
-    "I am designed to assist Telangana farmers with agriculture-related queries. "
-    "This question appears to be outside my domain — I may not be able to answer "
-    "non-agricultural questions. Please ask me about crops, soil, irrigation, "
-    "fertilizers, pests, weather for farming, government schemes, or livestock."
+    "I am AgriGPT.\n"
+    "I specialize in agriculture.\n"
+    "Please ask crop, pest, fertilizer, soil, weather or farming related questions."
 )
 
 
@@ -163,6 +163,42 @@ class ResponseValidator:
 
 # ─── Orchestrator / AI Service Class ──────────────────────────────────────────
 
+def emergency_regex_check(question: str) -> bool:
+    """
+    Returns True if the query is clearly out-of-scope based on emergency heuristics.
+    Only used as a safety safeguard to override LLM routing errors.
+    """
+    q_lower = question.lower()
+    
+    # Generic non-agri blacklist terms (programming, entertainment, dsa, etc.)
+    blacklist = [
+        r"\bmerge[- ]?sort\b", r"\bbubble[- ]?sort\b", r"\bquick[- ]?sort\b",
+        r"\bpython\b", r"\bjava\b", r"\bjavascript\b", r"\btypescript\b",
+        r"\bhtml\b", r"\bcss\b", r"\bsql query\b", r"\bdatabase schema\b",
+        r"\bwrite(?: a)? code\b", r"\bc\+\+\b", r"\bprogramming\b", r"\bsoftware\b",
+        r"\bwrite a python\b", r"\bwrite a java\b", r"\bleetcode\b", r"\bdsa\b",
+        r"\bmedication\b", r"\bmedicina\b", r"\bmedicial\b", r"\bdrug dose\b",
+        r"\bstock market\b", r"\bmutual fund\b", r"\binvestment advice\b",
+        r"\bwhat is your name\b", r"\bwho are you\b"
+    ]
+    
+    # Agricultural whitelist terms
+    whitelist = [
+        "crop", "pest", "fertilizer", "soil", "weather", "farming", "farm", "cotton",
+        "rice", "wheat", "disease", "insect", "mandi", "price", "seed", "irrigation",
+        "cultivation", "plant", "telangana", "agriculture", "livestock", "harvest",
+        "sow", "yield", "pesticide", "millet", "tomato", "maize", "sugarcane", "paddy"
+    ]
+    
+    # If it matches blacklist and does NOT contain any whitelist terms, block it
+    has_blacklist = any(re.search(pattern, q_lower) for pattern in blacklist)
+    has_whitelist = any(wl in q_lower for wl in whitelist)
+    
+    if has_blacklist and not has_whitelist:
+        return True
+    return False
+
+
 class AIService:
     """
     Core AI orchestration service acting as a lightweight coordinator.
@@ -186,50 +222,168 @@ class AIService:
 
     # ── Agent Unified Routing ────────────────────────────────────────────────
 
-    async def _route(self, question: str, history: List[Dict[str, str]] = None) -> dict:
-        """Determines scope and active tools using Native Function Calling with injected history."""
+    # ── Agent Unified Routing ────────────────────────────────────────────────
+
+    async def _classify_agricultural_intent(self, question: str) -> bool:
+        """
+        Runs a lightweight LLM intent classifier to distinguish agricultural queries
+        from other domains (programming, math, finance, etc.)
+        """
+        system_prompt = (
+            "You are a strict domain classification assistant for AgriGPT.\n"
+            "Analyze the user's query and determine if it is related to agriculture.\n"
+            "Agriculture domain includes: crops, farming, soil, pests, diseases, fertilizers, irrigation, livestock, weather for farming, mandi prices, agricultural policies, or farming techniques.\n"
+            "Non-agricultural domains include: general computer programming, algorithms (e.g. merge sort, bubble sort), math, medical/medicine (unless livestock/veterinary), politics, entertainment, sports, general history, general knowledge.\n"
+            "Respond ONLY with a JSON object:\n"
+            "{\n"
+            "  \"is_agricultural\": true or false\n"
+            "}"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Query: {question}"}
+        ]
+        
+        provider = llm_provider._determine_provider(None)
+        # Always use JSON mode (supported by both providers)
+        model = settings.GROQ_MODEL if provider == "groq" else settings.OPENROUTER_AGENT
+        
         try:
-            messages = [
-                {"role": "system", "content": _ROUTING_SYSTEM}
-            ]
-            if history:
-                messages.extend(history)
-            messages.append({"role": "user", "content": f'Farmer query: "{question}"'})
-            raw_json = await llm_provider.generate_response(
+            logger.info(f"Running intent classification on provider '{provider}' using model '{model}'")
+            raw_response = await llm_provider.generate_response(
                 messages=messages,
-                model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_AGENT,
+                model_name=model,
                 temperature=0.0,
-                tools=ROUTING_TOOLS,
-                tool_choice={"type": "function", "function": {"name": "route_and_extract_city"}}
+                response_format={"type": "json_object"}
             )
-            
-            # The LLM natively outputs valid JSON arguments from the tool call
-            routing = json.loads(raw_json)
-            
-            in_scope = bool(routing.get("in_scope", True))
-            result = {
-                "in_scope":       in_scope,
-                "use_weather":    bool(routing.get("use_weather",    False)) if in_scope else False,
-                "use_rag":        bool(routing.get("use_rag",        False)) if in_scope else False,
-                "use_web":        bool(routing.get("use_web",        False)) if in_scope else False,
-                "use_direct_llm": bool(routing.get("use_direct_llm", False)) if in_scope else False,
-                "city_name":      routing.get("city_name") if in_scope else None
-            }
-            if in_scope and not any([result["use_weather"], result["use_rag"], result["use_web"], result["use_direct_llm"]]):
-                result["use_direct_llm"] = True
-                
-            active = [k for k, v in result.items() if v and k.startswith("use_")]
-            scope_label = "IN_SCOPE" if result["in_scope"] else "OUT_OF_SCOPE"
-            logger.info(f"Routing → {scope_label} | tools: {active} | city: {result.get('city_name')}")
-            return result
+            clean_res = raw_response.strip()
+            if clean_res.startswith("```"):
+                lines = clean_res.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                clean_res = "\n".join(lines).strip()
+            data = json.loads(clean_res)
+            is_agri = bool(data.get("is_agricultural", False))
+            logger.info(f"Intent classification result for '{question}': is_agricultural = {is_agri}")
+            return is_agri
         except Exception as e:
-            logger.warning(f"Routing LLM failed: {e} — defaulting to direct_llm in-scope")
-            return {
-                "in_scope": True,
-                "use_weather": False, "use_rag": False,
-                "use_web": False, "use_direct_llm": True,
-                "city_name": None
-            }
+            logger.warning(f"Intent classification failed: {e}. Defaulting to True to avoid false rejection.")
+            return True
+
+    async def _route(self, question: str, history: List[Dict[str, str]] = None) -> dict:
+        """Determines scope and active tools using native tool calling (if supported) or JSON mode fallback."""
+        messages = [
+            {"role": "system", "content": _ROUTING_SYSTEM}
+        ]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": f'Farmer query: "{question}"'})
+
+        # Step 1: Check Provider Capability & Supports Tool Calling?
+        provider = llm_provider._determine_provider(None)
+        supports_tool_use = (provider == "groq") # Groq supports native tool calling; OpenRouter free models do not
+        
+        routing = None
+        
+        # Step 2: If YES -> Native Tool Calling
+        if supports_tool_use:
+            try:
+                logger.info(f"Attempting native tool calling routing on provider '{provider}'")
+                raw_json = await llm_provider.generate_response(
+                    messages=messages,
+                    model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_AGENT,
+                    temperature=0.0,
+                    tools=ROUTING_TOOLS,
+                    tool_choice={"type": "function", "function": {"name": "route_and_extract_city"}}
+                )
+                routing = json.loads(raw_json)
+                logger.info("Native tool calling routing succeeded")
+            except Exception as tool_err:
+                logger.warning(f"Native tool calling failed on provider '{provider}': {tool_err}. Falling back to JSON routing.")
+                routing = None
+
+        # Step 3: If NO (or if Native Tool Calling fails) -> JSON Routing
+        if routing is None:
+            try:
+                logger.info(f"Executing JSON mode routing fallback on provider '{provider}'")
+                raw_json = await llm_provider.generate_response(
+                    messages=messages,
+                    model_name=settings.GROQ_MODEL if settings.GROQ_API_KEYS else settings.OPENROUTER_AGENT,
+                    temperature=0.0,
+                    response_format={"type": "json_object"}
+                )
+                clean_json = raw_json.strip()
+                if clean_json.startswith("```"):
+                    lines = clean_json.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    clean_json = "\n".join(lines).strip()
+                routing = json.loads(clean_json)
+                logger.info("JSON mode routing succeeded")
+            except Exception as json_err:
+                logger.error(f"JSON routing failed: {json_err}. Falling back to keyword heuristic.")
+                routing = None
+
+        # Apply fallback if both LLM paths failed
+        if routing is None:
+            q_lower = question.lower()
+            keywords = ["crop", "pest", "fertilizer", "soil", "weather", "farming", "farm", "cotton", "rice", "wheat", "disease", "insect", "mandi", "price", "seed", "irrigation", "cultivation", "plant", "telangana", "agriculture", "livestock", "harvest", "sow", "yield", "pesticide", "millet", "tomato", "maize", "sugarcane", "paddy"]
+            keyword_match = any(kw in q_lower for kw in keywords)
+            logger.warning(f"All routing LLM paths failed. Falling back to keyword match ({keyword_match})")
+            if keyword_match:
+                routing = {
+                    "in_scope": True,
+                    "use_weather": False,
+                    "use_rag": True,
+                    "use_web": False,
+                    "use_direct_llm": False,
+                    "city_name": None
+                }
+            else:
+                routing = {
+                    "in_scope": False,
+                    "use_weather": False,
+                    "use_rag": False,
+                    "use_web": False,
+                    "use_direct_llm": False,
+                    "city_name": None
+                }
+
+        # Step 4: Agricultural Intent Classification
+        in_scope = bool(routing.get("in_scope", True))
+        if in_scope:
+            is_agri = await self._classify_agricultural_intent(question)
+            if not is_agri:
+                logger.warning(f"Agricultural Intent Classification failed for query: '{question}'. Setting in_scope to False.")
+                in_scope = False
+
+        # Step 5: Emergency Regex Safety Check (final safeguard)
+        is_blacklisted = emergency_regex_check(question)
+        if is_blacklisted:
+            logger.warning(f"Emergency safety regex triggered for query: '{question}'. Overriding routing to out-of-scope.")
+            in_scope = False
+
+        result = {
+            "in_scope":       in_scope,
+            "use_weather":    bool(routing.get("use_weather",    False)) if in_scope else False,
+            "use_rag":        bool(routing.get("use_rag",        False)) if in_scope else False,
+            "use_web":        bool(routing.get("use_web",        False)) if in_scope else False,
+            "use_direct_llm": bool(routing.get("use_direct_llm", False)) if in_scope else False,
+            "city_name":      routing.get("city_name") if in_scope else None
+        }
+        
+        # If in scope but no tool is selected, default to direct_llm
+        if in_scope and not any([result["use_weather"], result["use_rag"], result["use_web"], result["use_direct_llm"]]):
+            result["use_direct_llm"] = True
+            
+        active = [k for k, v in result.items() if v and k.startswith("use_")]
+        scope_label = "IN_SCOPE" if result["in_scope"] else "OUT_OF_SCOPE"
+        logger.info(f"Routing Decision → {scope_label} | tools: {active} | city: {result.get('city_name')}")
+        return result
 
     # ── Context String Aggregator ────────────────────────────────────────────
 
