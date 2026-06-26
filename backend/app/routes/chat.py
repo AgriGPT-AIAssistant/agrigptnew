@@ -1,23 +1,25 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 import uuid
 
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.ai_service import ai_service
 from app.dependencies.auth import get_current_user
+from app.core.limiter import limiter, RATE_LIMIT_PER_MINUTE
 
 router = APIRouter()
 
 @router.post("", response_model=ChatResponse)
-async def chat_interaction(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit(RATE_LIMIT_PER_MINUTE)
+async def chat_interaction(request: Request, chat_request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
     Standard HTTP POST endpoint for chat interactions.
     """
     try:
         user_id = current_user["sub"]
-        session_id = request.session_id or f"sess_{uuid.uuid4().hex[:12]}"
+        session_id = chat_request.session_id or f"sess_{uuid.uuid4().hex[:12]}"
         response = await ai_service.generate_response(
-            message=request.message,
+            message=chat_request.message,
             session_id=session_id,
             user_id=user_id
         )
@@ -28,13 +30,14 @@ async def chat_interaction(request: ChatRequest, current_user: dict = Depends(ge
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @router.post("/stream")
-async def chat_interaction_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit(RATE_LIMIT_PER_MINUTE)
+async def chat_interaction_stream(request: Request, chat_request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
     Server-Sent Events (SSE) streaming endpoint for real-time token delivery.
     """
     try:
         user_id = current_user["sub"]
-        session_id = request.session_id or f"sess_{uuid.uuid4().hex[:12]}"
+        session_id = chat_request.session_id or f"sess_{uuid.uuid4().hex[:12]}"
         # Ensure correct response headers for SSE streaming
         headers = {
             "Content-Type": "text/event-stream",
@@ -42,7 +45,7 @@ async def chat_interaction_stream(request: ChatRequest, current_user: dict = Dep
             "Connection": "keep-alive",
         }
         return StreamingResponse(
-            ai_service.generate_stream(message=request.message, session_id=session_id, user_id=user_id),
+            ai_service.generate_stream(message=chat_request.message, session_id=session_id, user_id=user_id),
             headers=headers,
             media_type="text/event-stream"
         )
