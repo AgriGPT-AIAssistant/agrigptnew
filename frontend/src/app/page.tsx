@@ -9,6 +9,7 @@ import { ChatInput } from '@/components/chat/chat-input';
 import { chatService } from '@/services/chatService';
 import api from '@/services/api';
 import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import { Message, Step } from '@/types/chat';
 import { Sprout } from 'lucide-react';
 
@@ -16,6 +17,7 @@ export default function Home() {
   const [statusText, setStatusText] = useState<string>('');
   const [mounted, setMounted] = useState(false);
   const { data: session, status } = useSession();
+  const router = useRouter();
 
   const {
     activeSessionId,
@@ -67,8 +69,9 @@ export default function Home() {
       delete api.defaults.headers.common['Authorization'];
       useChatStore.getState().resetStore();
       setMounted(false);
+      router.push('/auth');
     }
-  }, [session, status, createSession, loadBackendSessions]);
+  }, [session, status, createSession, loadBackendSessions, router]);
 
   // Load history when activeSessionId changes, only when authenticated/mounted
   useEffect(() => {
