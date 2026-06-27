@@ -8,7 +8,7 @@ import { ChatWindow } from '@/components/chat/chat-window';
 import { ChatInput } from '@/components/chat/chat-input';
 import { chatService } from '@/services/chatService';
 import api from '@/services/api';
-import { useSession } from 'next-auth/react';
+import { useSession, signOut } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { Message, Step } from '@/types/chat';
 import { Sprout } from 'lucide-react';
@@ -69,7 +69,13 @@ export default function Home() {
       delete api.defaults.headers.common['Authorization'];
       useChatStore.getState().resetStore();
       setMounted(false);
-      router.push('/auth');
+      
+      // If they are "authenticated" but missing the id_token, force a logout to break the redirect loop
+      if (status === 'authenticated' && !session?.id_token) {
+        signOut({ callbackUrl: '/auth' });
+      } else {
+        router.push('/auth');
+      }
     }
   }, [session, status, createSession, loadBackendSessions, router]);
 
