@@ -5,35 +5,46 @@ on:
     branches:
       - main
     paths:
-      - 'backend/**'
+      - "backend/**"
+
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          lfs: true
           fetch-depth: 0
+          lfs: true
 
-      - name: Push backend to Hugging Face
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "github-actions@github.com"
+
+      - name: Install Git LFS
+        run: |
+          git lfs install
+
+      - name: Deploy backend to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "GitHub Actions"
-
           cd backend
+
+          rm -rf .git
 
           git init
           git branch -M main
 
           git lfs install
+
           git add .
-          git commit -m "Auto deploy from GitHub" || true
+          git commit -m "Auto deployment"
 
           git remote add origin https://oauth2:${HF_TOKEN}@huggingface.co/spaces/Hanish23/agrigptnew
 
-          git push --force origin main
+          git push origin main --force
