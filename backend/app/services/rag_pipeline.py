@@ -251,14 +251,47 @@ class RAGPipeline:
             faiss_top_k=settings.RETRIEVAL_TOP_K,
             bm25_top_k=settings.RETRIEVAL_TOP_K
         )
+        
+        # Logging details for BUG 4 verification:
+        logger.info(f"=== RAG RETRIEVAL LOGS FOR QUERY: '{question}' ===")
+        print(f"\n=== RAG RETRIEVAL LOGS FOR QUERY: '{question}' ===")
+        logger.info(f"Top {len(hybrid_candidates)} retrieved hybrid candidates before reranking:")
+        print(f"Top {len(hybrid_candidates)} retrieved hybrid candidates before reranking:")
+        for idx, (chunk, score, method) in enumerate(hybrid_candidates[:settings.RETRIEVAL_TOP_K * 2]):
+            logger.info(f"  Candidate {idx + 1}: ID={chunk.id} | Score={score:.4f} | Method={method} | Snippet='{chunk.text[:60].strip()}...'")
+            print(f"  Candidate {idx + 1}: ID={chunk.id} | Score={score:.4f} | Method={method} | Snippet='{chunk.text[:60].strip()}...'")
+
         reranked = self._rerank_results(
             question,
             hybrid_candidates,
             pool_size=settings.RETRIEVAL_TOP_K * 2,
             top_n=settings.RERANK_TOP_K
         )
+        
+        # Log reranked order and similarity scores
+        logger.info(f"Reranked order (Similarity scores after cross-encoder):")
+        print(f"Reranked order (Similarity scores after cross-encoder):")
+        for idx, rc in enumerate(reranked):
+            logger.info(f"  Reranked {idx + 1}: Doc='{rc.parent.source}' | Section='{rc.parent.heading}' | Reranker Score={rc.reranker_score:.4f} | Hybrid Score={rc.hybrid_score:.4f} | Method={rc.retrieval_method}")
+            print(f"  Reranked {idx + 1}: Doc='{rc.parent.source}' | Section='{rc.parent.heading}' | Reranker Score={rc.reranker_score:.4f} | Hybrid Score={rc.hybrid_score:.4f} | Method={rc.retrieval_method}")
+
         deduped = self._deduplicate_results(reranked, sim_threshold=0.88)
+        
+        logger.info(f"Deduplicated to {len(deduped)} documents:")
+        print(f"Deduplicated to {len(deduped)} documents:")
+        for idx, rc in enumerate(deduped):
+            logger.info(f"  Kept {idx + 1}: Doc='{rc.parent.source}' | Section='{rc.parent.heading}' | Reranker Score={rc.reranker_score:.4f}")
+            print(f"  Kept {idx + 1}: Doc='{rc.parent.source}' | Section='{rc.parent.heading}' | Reranker Score={rc.reranker_score:.4f}")
+
         context = self._build_context(deduped, token_budget=2500)
+        
+        # Log final context token length
+        encoder = tiktoken.get_encoding("cl100k_base")
+        context_token_len = len(encoder.encode(context))
+        logger.info(f"Final prompt context length: {context_token_len} tokens")
+        print(f"Final prompt context length: {context_token_len} tokens")
+        logger.info("====================================================")
+        print("====================================================\n")
 
         sources = [
             {

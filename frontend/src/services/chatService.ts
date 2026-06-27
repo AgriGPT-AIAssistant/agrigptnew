@@ -27,6 +27,7 @@ export const chatService = {
   async sendMessageStream(
     message: string,
     sessionId: string | undefined,
+    token: string,
     onChunk: (chunk: string) => void,
     onEvent?: (event: string, data: any) => void,
     onDone?: () => void,
@@ -34,11 +35,18 @@ export const chatService = {
   ): Promise<void> {
     const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      } else if (process.env.NODE_ENV === 'development') {
+        headers['Authorization'] = 'Bearer mock-dev-token';
+      }
+
       const response = await fetch(`${baseUrl}/chat/stream`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ message, session_id: sessionId }),
       });
 

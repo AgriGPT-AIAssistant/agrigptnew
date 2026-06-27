@@ -2,22 +2,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
 from app.routes import health, chat
-
-from fastapi.middleware.cors import CORSMiddleware
-# ... (your existing code where app is created)
-app = FastAPI()
-# Add this block to allow your frontend to talk to the backend
-app.add_middleware(
-    CORSMiddleware,
-    # Replace "*" with your actual frontend URL for better security when in production
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from app.core.limiter import limiter
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,6 +22,9 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS configuration using environmental values loaded dynamically
 app.add_middleware(
